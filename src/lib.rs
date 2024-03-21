@@ -1,157 +1,238 @@
-#![feature(lazy_cell)]
+pub use proc::CVarEnum;
 
-use std::sync::Mutex;
+use std::{
+    num::{
+        IntErrorKind, NonZeroI128, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI8, NonZeroIsize,
+        NonZeroU128, NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU8, NonZeroUsize, ParseIntError,
+    },
+    sync::{Arc, RwLock},
+};
 
-#[macro_export]
-macro_rules! cvars {
-    ($($name:ident: $type:ty = $value:expr),+ $(,)?) => {
-        use std::sync::LazyLock;
+// Valid types
+// - bool
+// - u*
+// - i*
+// - usize
+// - isize
+// - f32
+// - f64
+// - String
+// - User Defined Enum
+//
+// Constraints
+// - String
+//  - Specific values, eg. "slow" "normal" "fast" (custom enums could be used as a replacement?)
+//  - Min and max length, eg. 4-24 characters for username
+// - Integer
+//  - Specific range eg. 512..=2048
+//
+// Syntax
+// CVar
+// [<namespace>.]<name> <value>
+//
+// r.full_bright <enabled:bool>
+// Disables all lighting when enabled.
+//
+// map <name:string> [gamemode:string]
+// Changes the map to map with matching name with optional gamemode specified.
 
-        $(
-            #[allow(non_upper_case_globals)]
-            static $name: LazyLock<CVar<$type>> = LazyLock::new(|| CVar::init($value));
-        )+
-    }
+#[derive(Clone)]
+pub struct CVar<T: Value>(Arc<InnerCVar<T>>);
+
+impl<T: Value> CVar<T> {}
+
+pub struct InnerCVar<T: Value> {
+    name: &'static str,
+    description: &'static str,
+    value: RwLock<T>,
 }
 
-// enum CVarState<T: 'static, F: Copy> {
-//     Init(&'static Mutex<T>),
-//     Uninit(ManuallyDrop<F>),
-// }
-
-// impl<T: 'static, F: Copy> Clone for CVarState<T, F> {
-//     fn clone(&self) -> Self {
-//         match self {
-//             Self::Init(arg0) => Self::Init(arg0.clone()),
-//             Self::Uninit(arg0) => Self::Uninit(arg0.clone()),
-//         }
-//     }
-// }
-
-// impl<T, F: Copy> Copy for CVarState<T, F> {}
-
-pub struct CVar<T>
-where
-    T: 'static,
-{
-    v: &'static Mutex<T>,
+pub trait Value: Sized {
+    fn parse(s: &str) -> Result<Self, Error>;
+    fn validate(s: &str) -> Result<Vec<String>, Error>;
 }
 
-impl<T> CVar<T>
-where
-    T: 'static,
-{
-    pub fn init(v: T) -> Self {
-        Self {
-            v: Box::leak(Box::new(Mutex::new(v))),
+#[derive(Debug, Clone)]
+pub enum Error {
+    InvalidValue {
+        value: String,
+    },
+    EmptyValue,
+    TooBig {
+        value: String,
+        min: String,
+        max: String,
+    },
+    TooSmall {
+        value: String,
+        min: String,
+        max: String,
+    },
+}
+
+impl Error {
+    #[inline]
+    pub fn invalid_value(value: &str) -> Self {
+        Self::InvalidValue {
+            value: value.to_string(),
         }
     }
 
-    pub fn lock(&self) -> std::sync::MutexGuard<'_, T> {
-        self.v.lock().unwrap()
+    #[inline]
+    pub fn too_large(value: &str, min: &str, max: &str) -> Self {
+        Self::TooBig {
+            value: value.to_string(),
+            min: min.to_string(),
+            max: max.to_string(),
+        }
     }
-}
 
-// impl<'b, T, F: Copy> Deref for CVar<T, F> {
-//     type Target = std::sync::MutexGuard<'b, T>;
+    #[inline]
+    pub fn too_small(value: &str, min: &str, max: &str) -> Self {
+        Self::TooSmall {
+            value: value.to_string(),
+            min: min.to_string(),
+            max: max.to_string(),
+        }
+    }
 
-//     fn deref(&'b self) -> &'b Self::Target
-//     {
-//         // self.value.lock().unwrap()
-//     }
-// }
-
-impl<T> Clone for CVar<T> {
-    fn clone(&self) -> Self {
-        Self {
-            v: self.v,
+    pub fn from_parse_int_error(e: ParseIntError, value: &str, min: &str, max: &str) -> Self {
+        match e.kind() {
+            IntErrorKind::Empty => Self::EmptyValue,
+            IntErrorKind::InvalidDigit => Self::invalid_value(value),
+            IntErrorKind::PosOverflow => Self::too_large(value, min, max),
+            IntErrorKind::NegOverflow => Self::too_small(value, min, max),
+            IntErrorKind::Zero => Self::invalid_value(value),
+            _ => unreachable!("match should be exhaustive but rust-analyzer doesn't recognize it as such ¯\\_(ツ)_/¯"),
         }
     }
 }
 
-impl<T> Copy for CVar<T> {}
+// impl From<ParseFloatError> for Error {
+//     fn from(_value: ParseFloatError) -> Self {
+//         Self::InvalidValue
+//     }
+// }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Condvar, Mutex};
-
-    use super::CVar;
-
-    cvars!(
-        NAME: String = "Default Name".to_string(),
-        COMPLEX: Complex = Complex {
-            _valid: true,
-            _stuff: String::from("test"),
-            _bytes: vec![0, 0, 1, 1],
-        },
-    );
-
-    #[derive(Debug)]
-    struct Complex {
-        _valid: bool,
-        _stuff: String,
-        _bytes: Vec<u8>,
+impl Value for bool {
+    fn parse(s: &str) -> Result<Self, Error> {
+        match s.to_lowercase().as_str() {
+            "t" => Ok(true),
+            "f" => Ok(false),
+            "true" => Ok(true),
+            "false" => Ok(false),
+            "1" => Ok(true),
+            "0" => Ok(false),
+            _ => Err(Error::invalid_value(s)),
+        }
     }
 
-    struct Test {
-        name: CVar<String>,
-        complex: CVar<Complex>,
-    }
+    fn validate(s: &str) -> Result<Vec<String>, Error> {
+        const VALUES: [&str; 2] = ["true", "false"];
 
-    impl Test {
-        pub fn new() -> Self {
-            Self {
-                name: *NAME,
-                complex: *COMPLEX,
+        let mut values = vec![];
+
+        for value in VALUES {
+            if value.starts_with(s) {
+                values.push(value.to_string());
             }
         }
 
-        pub fn use_name(&self) {
-            println!("Name: {}", self.name.lock());
-        }
+        Ok(values)
+    }
+}
 
-        pub fn set_name(&self, name: &str) {
-            *self.name.lock() = name.into();
-        }
-
-        pub fn use_complex(&self) {
-            println!("{:#?}", self.complex.lock());
+impl Value for String {
+    fn parse(s: &str) -> Result<Self, Error> {
+        if s.starts_with("\"") && s.ends_with("\"") {
+            Ok(s[1..s.len() - 1].to_string())
+        } else {
+            Err(Error::invalid_value(s))
         }
     }
 
-    #[test]
-    fn test() {
-        let mut handles = Vec::new();
-
-        let mutex = Mutex::new(false);
-        let condvar = Condvar::new();
-
-        let p = Arc::new((mutex, condvar));
-        for i in 0..16 {
-            let p = p.clone();
-            let handle = std::thread::spawn(move || {
-                let lock = p.0.lock().unwrap();
-                std::mem::drop(p.1.wait(lock).unwrap());
-
-                let test = Test::new();
-
-                test.use_name();
-                test.set_name(&format!("{}", i));
-                test.use_name();
-
-                test.use_complex();
-            });
-
-            handles.push(handle);
-        }
-
-        std::thread::sleep(std::time::Duration::from_secs(1));
-
-        *p.0.lock().unwrap() = true;
-        p.1.notify_all();
-
-        for handle in handles {
-            handle.join().unwrap();
+    fn validate(s: &str) -> Result<Vec<String>, Error> {
+        if s.starts_with("\"") && s.ends_with("\"") {
+            Ok(vec![])
+        } else {
+            Err(Error::invalid_value(s))
         }
     }
 }
+
+macro_rules! impl_value_int {
+    ($error_fn:expr, $($t:ty),+ $(,)?) => {
+        $(
+            impl Value for $t {
+                fn parse(s: &str) -> Result<Self, Error> {
+                    let v = s.parse::<$t>().map_err(|e| $error_fn(e, s, &<$t>::MIN.to_string(), &<$t>::MAX.to_string()))?;
+
+                    Ok(v)
+                }
+
+                fn validate(s: &str) -> Result<Vec<String>, Error> {
+                    let _ = s.parse::<$t>().map_err(|e| $error_fn(e, s, &<$t>::MIN.to_string(), &<$t>::MAX.to_string()))?;
+
+                    Ok(vec![])
+                }
+            }
+        )+
+    };
+}
+
+macro_rules! impl_value_float {
+    ($($t:ty),+ $(,)?) => {
+        $(
+            impl Value for $t {
+                fn parse(s: &str) -> Result<Self, Error> {
+                    let v = s.parse::<$t>().map_err(|_e| Error::invalid_value(s))?;
+
+                    Ok(v)
+                }
+
+                fn validate(s: &str) -> Result<Vec<String>, Error> {
+                    let _ = s.parse::<$t>().map_err(|_e| Error::invalid_value(s))?;
+
+                    Ok(vec![])
+                }
+            }
+        )+
+    };
+}
+
+// Integers
+impl_value_int!(
+    Error::from_parse_int_error,
+    u8,
+    u16,
+    u32,
+    u64,
+    u128,
+    i8,
+    i16,
+    i32,
+    i64,
+    i128,
+    usize,
+    isize
+);
+
+// Non-Zero Integers
+impl_value_int!(
+    Error::from_parse_int_error,
+    NonZeroU8,
+    NonZeroU16,
+    NonZeroU32,
+    NonZeroU64,
+    NonZeroU128,
+    NonZeroI8,
+    NonZeroI16,
+    NonZeroI32,
+    NonZeroI64,
+    NonZeroI128,
+    NonZeroUsize,
+    NonZeroIsize
+);
+
+// Floating Point Numbers
+impl_value_float!(f32, f64);
